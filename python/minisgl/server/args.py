@@ -61,18 +61,9 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     Returns:
         EngineConfig instance with parsed arguments
     """
-    from minisgl.attention import validate_backend
+    from minisgl.attention import SUPPORTED_ATTENTION_BACKENDS, validate_attn_backend
     from minisgl.kvcache import SUPPORTED_CACHE_MANAGER
-
-    def validate_moe_backend(backend: str) -> str:
-        """Validate MoE backend argument."""
-        # Accept any non-empty string as backend name
-        # Specific backend validation can be added later as backends are implemented
-        if not backend:
-            from argparse import ArgumentTypeError
-
-            raise ArgumentTypeError(f"MoE backend must be a non-empty string, got: {backend}")
-        return backend
+    from minisgl.moe import SUPPORTED_MOE_BACKENDS, validate_moe_backend
 
     parser = argparse.ArgumentParser(description="MiniSGL Server Arguments")
 
@@ -190,8 +181,9 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     parser.add_argument(
         "--attention-backend",
         "--attn",
-        type=validate_backend,
+        type=validate_attn_backend,
         default=ServerArgs.attention_backend,
+        choices=["auto"] + SUPPORTED_ATTENTION_BACKENDS.supported_names(),
         help="The attention backend to use. If two backends are specified,"
         " the first one is used for prefill and the second one for decode.",
     )
@@ -208,8 +200,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         "--moe-backend",
         type=validate_moe_backend,
         default=ServerArgs.moe_backend,
-        help="The MoE backend to use. default is auto, supported backends are fused.",
-        choices=["auto", "fused"],
+        choices=["auto"] + SUPPORTED_MOE_BACKENDS.supported_names(),
+        help="The MoE backend to use.",
     )
 
     parser.add_argument(

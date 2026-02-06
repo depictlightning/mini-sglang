@@ -27,22 +27,18 @@ def resolve_auto_backend() -> str:
     return "fused"
 
 
-def validate_backend(backend: str):
+def validate_moe_backend(backend: str) -> bool:
     if backend != "auto":
-        supported = SUPPORTED_MOE_BACKENDS.supported_names()
-        if backend not in supported:
-            raise ValueError(f"Unsupported MoE backend: {backend}. Supported backends: {supported}")
+        SUPPORTED_MOE_BACKENDS.assert_supported(backend)
     return True
 
 
-def create_moe_backend(
-    backend: str,
-) -> BaseMoeBackend:
+def create_moe_backend(backend: str) -> BaseMoeBackend:
     if backend == "auto":
         backend = resolve_auto_backend()
         logger.info(f"Auto-selected MoE backend: {backend}")
     else:
-        validate_backend(backend)
+        validate_moe_backend(backend)
         logger.info(f"Selected MoE backend: {backend}")
 
     return SUPPORTED_MOE_BACKENDS[backend]()
@@ -52,5 +48,5 @@ __all__ = [
     "BaseMoeBackend",
     "create_moe_backend",
     "SUPPORTED_MOE_BACKENDS",
-    "validate_backend",
+    "validate_moe_backend",
 ]

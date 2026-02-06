@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Literal
 import torch
 from minisgl.distributed import get_tp_info
 from minisgl.env import ENV
-from minisgl.utils import divide_even
-from minisgl.utils.logger import init_logger
+from minisgl.utils import div_even, init_logger
 
 from .base import BaseAttnBackend, BaseAttnMetadata
 from .utils import BaseCaptureData, make_positions
@@ -104,12 +103,13 @@ class FlashInferBackend(BaseAttnBackend):
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.float_workspace_buffer,
             kv_layout="NHD",
-            backend="fa2",  # flashinfer fa3 is buggy, use fa2 instead
+            backend="fa2",  # flashinfer fa3 is slow, use fa2 instead
         )
         self.decode_wrappers = BatchDecodeWithPagedKVCacheWrapper(
             self.float_workspace_buffer,
             use_tensor_cores=self.use_tensor_cores,
             kv_layout="NHD",
+            backend="fa2",  # flashinfer fa3 is slow, use fa2 instead
         )
 
         # NOTE: some hack to reuse the int_workspace_buffer
@@ -118,8 +118,8 @@ class FlashInferBackend(BaseAttnBackend):
 
         # initialize some data members
         tp_size = get_tp_info().size
-        self.qo_head_local = divide_even(self.config.num_qo_heads, tp_size)
-        self.kv_head_local = divide_even(self.config.num_kv_heads, tp_size)
+        self.qo_head_local = div_even(self.config.num_qo_heads, tp_size)
+        self.kv_head_local = div_even(self.config.num_kv_heads, tp_size)
 
         self.cached_ones_cpu: torch.Tensor = torch.tensor([], dtype=torch.int32, pin_memory=True)
         # for cuda graph
@@ -257,6 +257,7 @@ class FlashInferBackend(BaseAttnBackend):
             indices_buffer=capture.indices,
             last_page_len_buffer=capture.one_tensor[:bs],
         )
+        self.graph_wrappers[bs]._backend = "fa2"
         self.graph_wrappers[bs]._int_workspace_buffer = self.int_workspace_buffer
         self.prepare_metadata(batch)
         metadata = batch.attn_metadata

@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal
 
 import torch
-from minisgl.moe.base import BaseMoeBackend
 
 if TYPE_CHECKING:
     from minisgl.attention import BaseAttnBackend, BaseAttnMetadata
     from minisgl.kvcache import BaseCacheHandle
+    from minisgl.moe import BaseMoeBackend
 
 
 @dataclass
@@ -99,7 +99,7 @@ class Batch:
 class Context:
     page_size: int
     attn_backend: BaseAttnBackend
-    moe_backend: BaseMoeBackend
+    moe_backend: BaseMoeBackend = field(init=False)
     _batch: Batch | None = field(default=None, init=False)
 
     @property

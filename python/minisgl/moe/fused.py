@@ -1,26 +1,32 @@
 import functools
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
-import triton
-import triton.language as tl
-from minisgl.kernel.moe_impl import fused_moe_kernel_triton
-from minisgl.kernel.triton.fused_moe import moe_sum_reduce_triton
-from minisgl.moe.base import BaseMoeBackend
-from minisgl.moe.utils import select_experts
-from sgl_kernel import gelu_and_mul, silu_and_mul
-from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+from minisgl.moe import BaseMoeBackend
+from minisgl.utils import div_ceil
 
-def ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
 
-@torch.compile
-def moe_sum_reduce_torch_compile(x, out, routed_scaling_factor):
-    torch.sum(x, dim=1, out=out)
-    out.mul_(routed_scaling_factor)
+def fused_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_token_non_padded: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    from sgl_kernel import topk_softmax
 
-def is_cuda():
-    return torch.cuda.is_available() and torch.version.cuda
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    M, _ = hidden_states.shape
+    topk_weights = torch.empty(M, topk, dtype=torch.float32, device=hidden_states.device)
+    topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
+    topk_softmax(topk_weights, topk_ids, gating_output.float(), renormalize)
+    if renormalize:
+        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
+    if num_token_non_padded is not None:
+        indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
+        topk_ids[indices >= num_token_non_padded, :] = -1
+    return topk_weights, topk_ids
+
 
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
@@ -62,9 +68,11 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+
     max_num_tokens_padded = topk_ids.numel() + (num_experts + 1) * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    max_num_m_blocks = div_ceil(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
     cumsum_buffer = torch.empty((num_experts + 2,), dtype=torch.int32, device=topk_ids.device)
@@ -79,6 +87,7 @@ def moe_align_block_size(
         True,
     )
     return sorted_ids, expert_ids, num_tokens_post_pad
+
 
 def get_default_config(
     M: int,
@@ -109,7 +118,7 @@ def try_get_optimal_moe_config(
     w2_shape: Tuple[int, ...],
     top_k: int,
     M: int,
-):
+) -> Dict[str, int]:
     E, _, N = w2_shape
     config = get_default_config(M, E, N, w1_shape[2], top_k)
     return config
@@ -123,7 +132,9 @@ def fused_experts_impl(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-):
+) -> torch.Tensor:
+    from minisgl.kernel import fused_moe_kernel_triton, moe_sum_reduce_triton
+    from minisgl.layers import gelu_and_mul, silu_and_mul
 
     padded_size = 0
     assert hidden_states.shape[1] == w1.shape[2] - padded_size, "Hidden size mismatch"
@@ -159,8 +170,7 @@ def fused_experts_impl(
     intermediate_cache3 = cache[: M * topk_ids.shape[1] * w2.shape[1]].view(
         (M, topk_ids.shape[1], w2.shape[1]),
     )
-
-    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    compute_type = hidden_states.dtype
 
     out_hidden_states = hidden_states
     curr_hidden_states = hidden_states
@@ -193,13 +203,8 @@ def fused_experts_impl(
         config,
         compute_type=compute_type,
     )
-
-    if activation == "silu":
-        silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
-    elif activation == "gelu":
-        gelu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
-    else:
-        raise ValueError(f"Unsupported activation: {activation=}")
+    FN_MAP = {"silu": silu_and_mul, "gelu": gelu_and_mul}
+    FN_MAP[activation](intermediate_cache1.view(-1, N), intermediate_cache2)
     fused_moe_kernel_triton(
         intermediate_cache2,
         w2,
@@ -221,8 +226,8 @@ def fused_experts_impl(
     )
     return out_hidden_states
 
-class FusedMoe(BaseMoeBackend):
 
+class FusedMoe(BaseMoeBackend):
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -232,44 +237,20 @@ class FusedMoe(BaseMoeBackend):
         topk: int,
         renormalize: bool,
         activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
     ) -> torch.Tensor:
-    
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
-            router_logits=gating_output,
-            top_k=topk,
+            gating_output=gating_output,
+            topk=topk,
             renormalize=renormalize,
         )
-        return self.fused_experts(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-        )
-
-    def fused_experts(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-    ):
-
-        fused_experts_impl(
+        return fused_experts_impl(
             hidden_states,
             w1,
             w2,
             topk_weights,
             topk_ids,
             activation,
-            apply_router_weight_on_input,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
-        return hidden_states
-
-
-

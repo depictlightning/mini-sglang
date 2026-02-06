@@ -11,7 +11,8 @@ from minisgl.kvcache import create_kvcache
 from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_hf_weight
 from minisgl.moe import create_moe_backend
-from minisgl.utils import divide_even, init_logger, torch_dtype
+from minisgl.utils import div_even, init_logger, torch_dtype
+
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory, mem_GB
 from .sample import BatchSamplingArgs, Sampler
@@ -51,7 +52,7 @@ class Engine:
         # load model and determine number of pages
         set_rope_device(self.device)
         with torch.device("meta"), torch_dtype(config.dtype):
-            self.model = create_model(config)
+            self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
         self.num_pages = self.dummy_page = self._determine_num_pages(init_free_memory, config)
         self.kv_cache = create_kvcache(
@@ -77,9 +78,9 @@ class Engine:
             if "moe" in config.model_config.model_type
             else None
         )
-        self.ctx = Context(
-            page_size=1, attn_backend=self.attn_backend, moe_backend=self.moe_backend
-        )
+        self.ctx = Context(page_size=1, attn_backend=self.attn_backend)
+        if self.moe_backend:
+            self.ctx.moe_backend = self.moe_backend
         set_global_ctx(self.ctx)
         self.sampler = Sampler(self.device, self.model_config.vocab_size)
 
@@ -154,7 +155,7 @@ class Engine:
         cache_per_page = (
             2  # key + value
             * self.model_config.head_dim
-            * divide_even(self.model_config.num_kv_heads, config.tp_info.size)
+            * div_even(self.model_config.num_kv_heads, config.tp_info.size)
             * config.page_size
             * self.dtype.itemsize
             * self.model_config.num_layers

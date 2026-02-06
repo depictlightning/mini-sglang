@@ -1,10 +1,9 @@
-import torch
 import triton
 import triton.language as tl
 
 
 @triton.jit
-def _moe_sum_reduce_kernel(
+def moe_sum_reduce_kernel(
     input_ptr,
     input_stride_0,
     input_stride_1,
@@ -192,36 +191,3 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
-
-
-def moe_sum_reduce_triton(input: torch.Tensor, output: torch.Tensor):
-    assert input.is_contiguous()
-    assert output.is_contiguous()
-
-    token_num, topk_num, hidden_dim = input.shape
-    assert output.shape[0] == token_num and output.shape[1] == hidden_dim
-
-    BLOCK_M = 1
-    BLOCK_DIM = 2048
-    NUM_STAGE = 1
-    num_warps = 8
-
-    grid = (
-        triton.cdiv(token_num, BLOCK_M),
-        triton.cdiv(hidden_dim, BLOCK_DIM),
-    )
-
-    _moe_sum_reduce_kernel[grid](
-        input,
-        *input.stride(),
-        output,
-        *output.stride(),
-        token_num=token_num,
-        topk_num=topk_num,
-        hidden_dim=hidden_dim,
-        BLOCK_M=BLOCK_M,
-        BLOCK_DIM=BLOCK_DIM,
-        NUM_STAGE=NUM_STAGE,
-        num_warps=num_warps,
-    )
-    return

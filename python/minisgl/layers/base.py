@@ -69,12 +69,7 @@ class BaseOP:
                     item = state_dict.pop(_concat_prefix(prefix, name))
 
                 assert isinstance(item, torch.Tensor)
-                assert (
-                    param.shape == item.shape
-                ), f"Shape mismatch: param {param.shape} vs item {item.shape}"
-                assert (
-                    param.dtype == item.dtype
-                ), f"Dtype mismatch: param {param.dtype} vs item {item.dtype}"
+                assert param.shape == item.shape and param.dtype == item.dtype
 
                 setattr(self, name, item)
 

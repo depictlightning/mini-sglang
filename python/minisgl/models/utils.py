@@ -8,12 +8,13 @@ from minisgl.layers import (
     LinearColParallelMerged,
     LinearOProj,
     LinearQKVMerged,
+    LinearReplicated,
     LinearRowParallel,
+    MoELayer,
     RMSNorm,
+    gelu_and_mul,
     silu_and_mul,
 )
-from minisgl.layers.linear import LinearReplicated
-from minisgl.layers.moe import MoELayer
 from minisgl.models import ModelConfig
 from minisgl.utils import nvtx_annotate
 
@@ -29,12 +30,11 @@ class GatedMLP(BaseOP):
             has_bias=False,
         )
 
-        match config.hidden_act:
-            case "silu":
-                self.act_fn = silu_and_mul
-            case act_fn:
-                raise ValueError(f"Unsupported activation function: {act_fn}")
-
+        FN_MAP = {"silu": silu_and_mul, "gelu": gelu_and_mul}
+        act_fn = FN_MAP.get(config.hidden_act, None)
+        if act_fn is None:
+            raise ValueError(f"Unsupported activation function: {config.hidden_act}")
+        self.act_fn = act_fn
         self.down_proj = LinearRowParallel(
             config.intermediate_size,
             config.hidden_size,
@@ -57,7 +57,7 @@ class MoEMLP(BaseOP):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob
+            renormalize=config.norm_topk_prob,
         )
         self.gate = LinearReplicated(
             config.hidden_size,

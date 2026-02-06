@@ -3,10 +3,9 @@ from typing import Optional
 import torch
 from minisgl.core import get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
-from minisgl.layers.base import BaseOP
+from minisgl.utils import div_even
 
-
-from minisgl.utils import divide_even
+from .base import BaseOP
 
 
 class MoELayer(BaseOP):
@@ -19,7 +18,6 @@ class MoELayer(BaseOP):
         layer_id: Optional[int] = None,
         params_dtype: Optional[torch.dtype] = None,
         renormalize: bool = True,
-        tp_size: Optional[int] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
     ):
@@ -35,45 +33,27 @@ class MoELayer(BaseOP):
         self._comm = DistributedCommunicator()
 
         tp_info = get_tp_info()
-        self.tp_size = tp_info.size if tp_size is None else tp_size
-        self.tp_rank = tp_info.rank if tp_size is None else 0
-
-        assert self.intermediate_size % self.tp_size == 0, (
-            f"Intermediate size ({self.intermediate_size}) must be divisible "
-            f"by tp_size ({self.tp_size})"
-        )
-
-        self.intermediate_size_per_partition = self.intermediate_size // self.tp_size
+        self.tp_size = tp_size = tp_info.size
         self.renormalize = renormalize
         self.activation = activation
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.layer_id = layer_id
-
-        intermediate_size_per_partition = divide_even(intermediate_size, self.tp_size)
-
-        self.gate_up_proj = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        intermediate_size_per_partition = div_even(intermediate_size, tp_size)
+        self.gate_up_proj = torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=params_dtype,
         )
-
-        self.down_proj = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        self.down_proj = torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         ctx = get_global_ctx()
-
         final_hidden_states = ctx.moe_backend.forward(
             hidden_states=hidden_states,
             w1=self.gate_up_proj,
@@ -82,9 +62,8 @@ class MoELayer(BaseOP):
             topk=self.top_k,
             renormalize=self.renormalize,
             activation=self.activation,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
-
         if self.tp_size > 1:
             final_hidden_states = self._comm.all_reduce(final_hidden_states)
-
         return final_hidden_states
