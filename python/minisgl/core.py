@@ -56,6 +56,7 @@ class Req:
     def append_host(self, next_token: torch.Tensor) -> None:
         self.input_ids = torch.cat([self.input_ids, next_token])
 
+    @property
     def can_decode(self) -> bool:
         return self.remain_len > 0
 
@@ -73,8 +74,9 @@ class Batch:
     phase: Literal["prefill", "decode"]
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
+    positions: torch.Tensor = field(init=False)
     out_loc: torch.Tensor = field(init=False)
-    padded_reqs: List[Req] = field(init=False)  # may contain some dummy reqs for padding
+    padded_reqs: List[Req] = field(init=False)
     # this field should be set by attention backend
     attn_metadata: BaseAttnMetadata = field(init=False)
 
