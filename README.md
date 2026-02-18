@@ -173,6 +173,11 @@ python3 -m sglang.launch_server --model "Qwen/Qwen3-32B" --tp 4 \
     --disable-radix --port 1919 --decode-attention flashinfer
 ```
 
+> **Note**: If you encounter network issues when downloading models from HuggingFace, try using `--model-source modelscope` to download from ModelScope instead:
+> ```bash
+> python -m minisgl --model "Qwen/Qwen3-32B" --tp 4 --model-source modelscope
+> ```
+
 ![online](https://lmsys.org/images/blog/minisgl/online.png)
 
 ## 📚 Learn More
