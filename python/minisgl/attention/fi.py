@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Dict, List, Literal
 
 import torch
+from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import get_tp_info
 from minisgl.env import ENV
 from minisgl.utils import div_even, init_logger
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
         BatchPrefillWithPagedKVCacheWrapper,
         CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
     )
-    from minisgl.core import Batch
     from minisgl.kvcache import BaseKVCache
     from minisgl.models import ModelConfig
 
@@ -79,12 +79,7 @@ class FIMetadata(BaseAttnMetadata):
 
 
 class FlashInferBackend(BaseAttnBackend):
-    def __init__(
-        self,
-        config: ModelConfig,
-        kvcache: BaseKVCache,
-        page_table: torch.Tensor,
-    ) -> None:
+    def __init__(self, config: ModelConfig, kvcache: BaseKVCache) -> None:
         from flashinfer import (
             BatchDecodeWithPagedKVCacheWrapper,
             BatchPrefillWithPagedKVCacheWrapper,
@@ -123,7 +118,6 @@ class FlashInferBackend(BaseAttnBackend):
         self.max_graph_bs = 0
         self.graph_wrappers: Dict[int, CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = {}
         self.capture: FICaptureData | None = None
-        self.page_table = page_table
 
     @staticmethod
     def _initialize_metadata_once(metadata: FIMetadata) -> None:
@@ -204,11 +198,13 @@ class FlashInferBackend(BaseAttnBackend):
             cu_seqlens_q_cpu = cu_seqlens_k_cpu
         else:  # normal extend prefill, with partial cache hit
             cu_seqlens_q_cpu = torch.tensor([0] + seqlens_q, **cpu_kwargs).cumsum_(dim=0)
+
+        page_table = get_global_ctx().page_table
         batch.attn_metadata = FIMetadata(
             cu_seqlens_q_cpu=cu_seqlens_q_cpu,
             cu_seqlens_k_cpu=cu_seqlens_k_cpu,
             cu_seqlens_q_gpu=cu_seqlens_q_cpu.to(device, non_blocking=True),
-            indices=torch.cat([self.page_table[req.table_idx, : req.device_len] for req in reqs]),
+            indices=torch.cat([page_table[req.table_idx, : req.device_len] for req in reqs]),
             last_page_len_cpu=self._get_ones_cpu(padded_size),
             num_qo_heads=self.qo_head_local,
             num_kv_heads=self.kv_head_local,

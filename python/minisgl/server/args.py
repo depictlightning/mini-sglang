@@ -172,7 +172,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
 
     parser.add_argument(
         "--num-pages",
-        "--num-tokens",
         dest="num_page_override",
         type=int,
         default=ServerArgs.num_page_override,

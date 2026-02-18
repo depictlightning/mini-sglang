@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+from minisgl.core import Batch, get_global_ctx
 
 from .base import BaseAttnBackend, BaseAttnMetadata
 from .utils import BaseCaptureData
 
 if TYPE_CHECKING:
-    from minisgl.core import Batch
     from minisgl.kvcache import BaseKVCache
     from minisgl.models import ModelConfig
 
@@ -34,14 +34,13 @@ class FAMetadata(BaseAttnMetadata):
 
 
 class FlashAttentionBackend(BaseAttnBackend):
-    def __init__(self, config: ModelConfig, kvcache: BaseKVCache, page_table: torch.Tensor):
+    def __init__(self, config: ModelConfig, kvcache: BaseKVCache):
         self.config = config
         self.kvcache = kvcache
         self.capture: FACaptureData | None = None
         self.max_graph_bs = 0
         self.capture_bs: List[int] = []
         self.scale = config.head_dim**-0.5
-        self.page_table = page_table
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
@@ -86,7 +85,7 @@ class FlashAttentionBackend(BaseAttnBackend):
             cu_seqlens_q = torch.tensor([0] + seqlens_q, **cpu_kwargs).cumsum_(dim=0)
             cu_seqlens_q = cu_seqlens_q.to(self.kvcache.device, non_blocking=True)
 
-        page_table = self.page_table
+        page_table = get_global_ctx().page_table
         new_page_table = torch.stack([page_table[req.table_idx, :max_seqlen_k] for req in reqs])
 
         # copy from CPU to GPU

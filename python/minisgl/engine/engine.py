@@ -26,10 +26,6 @@ class ForwardOutput(NamedTuple):
     copy_done_event: torch.cuda.Event
 
 
-def create_page_table(shape: Tuple[int, int], device: torch.device) -> torch.Tensor:
-    return torch.zeros(shape, dtype=torch.int32, device=device)
-
-
 def _align_up_32(num: int) -> int:
     return (num + 31) // 32 * 32
 
@@ -43,45 +39,55 @@ class Engine:
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
         self.dtype = config.dtype
+        self.ctx = Context(config.page_size)
+        set_global_ctx(self.ctx)
 
         self.tp_cpu_group = self._init_communication(config)
         init_free_memory = self._sync_get_memory()[1]
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
+        # ======================= Model initialization ========================
         set_rope_device(self.device)
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
-        self.num_pages = self.dummy_page = self._determine_num_pages(init_free_memory, config)
+
+        # ======================= KV cache initialization ========================
+        self.num_pages = self._determine_num_pages(init_free_memory, config)
+        self.dummy_loc = self.num_pages * config.page_size
         self.kv_cache = create_kvcache(
             model_config=config.model_config,
             num_pages=self.num_pages + 1,  # +1 for dummy page
             device=self.device,
             dtype=self.dtype,
         )
-        # NOTE: make page table 128 aligned (32 * sizeof(int32) == 128 bytes)
-        self.max_seq_len = min(config.max_seq_len, self.num_pages)
+
+        # ======================= Page table initialization ========================
+        # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
+        self.max_seq_len = min(config.max_seq_len, self.dummy_loc)
         aligned_max_seq_len = _align_up_32(self.max_seq_len)
-        self.page_table = create_page_table(  # + 1 for dummy request
+        self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
             (config.max_running_req + 1, aligned_max_seq_len),
+            dtype=torch.int32,
             device=self.device,
         )
-        self.attn_backend = create_attention_backend(
+
+        # ======================= Attention & MoE backend initialization ========================
+        self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend,
             config.model_config,
             self.kv_cache,
-            self.page_table,
         )
-        self.ctx = Context(page_size=1, attn_backend=self.attn_backend)
-        set_global_ctx(self.ctx)
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
+
+        # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
-        # cuda graph related
+        # ======================= Graph capture initialization ========================
         self.dummy_req = Req(
             input_ids=torch.tensor([0], dtype=torch.int32, device="cpu"),
             table_idx=config.max_running_req,
@@ -91,7 +97,7 @@ class Engine:
             sampling_params=None,  # type: ignore
             cache_handle=None,  # type: ignore
         )
-        self.page_table[self.dummy_req.table_idx].fill_(self.dummy_page)
+        self.page_table[self.dummy_req.table_idx].fill_(self.dummy_loc)
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -159,9 +165,10 @@ class Engine:
             available_memory = int(config.memory_ratio * old_free_memory) - model_memory
             num_pages = available_memory // cache_per_page
 
-        assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-tokens"
+        assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
+        num_tokens = num_pages * config.page_size
         real_kv_size = num_pages * cache_per_page
-        logger.info(f"Allocating {num_pages} pages for KV cache, K + V = {mem_GB(real_kv_size)}")
+        logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
         return num_pages
 
     def _sync_get_memory(self) -> Tuple[int, int]:

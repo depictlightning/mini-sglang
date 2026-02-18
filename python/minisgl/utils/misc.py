@@ -28,6 +28,16 @@ def div_ceil(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def align_ceil(a: int, b: int) -> int:
+    """Aligns a to the next multiple of b"""
+    return div_ceil(a, b) * b
+
+
+def align_down(a: int, b: int) -> int:
+    """Aligns a to the previous multiple of b"""
+    return (a // b) * b
+
+
 class Unset:
     pass
 

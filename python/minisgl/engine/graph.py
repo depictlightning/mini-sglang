@@ -157,14 +157,13 @@ class GraphRunner:
         g.replay()
         return self.buffer.logits[: batch.size]
 
-    def pad_batch(self, batch: Batch) -> int:
+    def pad_batch(self, batch: Batch) -> None:
         padded_size = (  # choose the first available batch size
             next(bs for bs in self.graph_bs_list if bs >= batch.size)
             if self.can_use_cuda_graph(batch)
             else batch.size
         )
         batch.padded_reqs = batch.reqs + [self.dummy_req] * (padded_size - batch.size)
-        return batch.padded_size - batch.size
 
     # NOTE: This must be called before freeing NCCL resources to prevent program hang
     def destroy_cuda_graphs(self) -> None:

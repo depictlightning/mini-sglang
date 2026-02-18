@@ -71,6 +71,7 @@ class Scheduler(SchedulerIOMixin):
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_id = self.tokenizer.eos_token_id
         self.page_table = self.engine.page_table
+        self.page_size = config.page_size
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
 
@@ -142,18 +143,20 @@ class Scheduler(SchedulerIOMixin):
         )
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
-        needed_size = sum(r.extend_len for r in batch.reqs)
-        out_loc = self.cache_manager.allocate(needed_size)
-        # NOTE: Pad the batch if needed
-        if padding_size := self.engine.graph_runner.pad_batch(batch):
-            out_loc = F.pad(out_loc, (0, padding_size), value=self.engine.dummy_page)
-        batch.out_loc = out_loc
+        self.engine.graph_runner.pad_batch(batch)
         batch.positions = _make_positions(batch, self.device)
         input_mapping = _make_input_tuple(batch, self.device)
         write_mapping = _make_write_tuple(batch, self.device)
 
-        # NOTE: write out_loc to page_table before `prepare_metadata`
-        self.page_table[input_mapping] = batch.out_loc
+        # allocate pages
+        padding_size = batch.padded_size - batch.size
+        needed_tokens = len(batch.positions) - padding_size  # unpadded tokens
+        out_loc = self.cache_manager.allocate(needed_tokens)
+        if padding_size > 0:
+            out_loc = F.pad(out_loc, (0, padding_size), value=self.engine.dummy_loc)
+        self.page_table[input_mapping] = out_loc
+        batch.out_loc = out_loc
+
         self.engine.attn_backend.prepare_metadata(batch)
         return ForwardInput(
             batch=batch,
@@ -242,7 +245,8 @@ class Scheduler(SchedulerIOMixin):
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
-    indices_host = torch.empty(len(batch.out_loc), dtype=torch.int32, pin_memory=True)
+    needed_size = sum(r.extend_len for r in batch.padded_reqs)
+    indices_host = torch.empty(needed_size, dtype=torch.int32, pin_memory=True)
     offset = 0
     for req in batch.padded_reqs:
         length = req.extend_len
@@ -257,18 +261,18 @@ def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
 
 
 def _make_input_tuple(batch: Batch, device: torch.device) -> Indice2D:
-    mapping_host = torch.empty(len(batch.out_loc), dtype=torch.int32, pin_memory=True)
+    mapping_host = torch.empty(len(batch.positions), dtype=torch.int64, pin_memory=True)
     offset = 0
     for req in batch.padded_reqs:
         length = req.extend_len
         mapping_host[offset : offset + length].fill_(req.table_idx)
         offset += length
-    return mapping_host.to(device, non_blocking=True), batch.positions
+    return mapping_host.to(device, non_blocking=True), batch.positions.to(torch.int64)
 
 
 def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
     mapping_list = [req.table_idx for req in batch.reqs]
-    mapping_host = torch.tensor(mapping_list, dtype=torch.int32, pin_memory=True)
+    mapping_host = torch.tensor(mapping_list, dtype=torch.int64, pin_memory=True)
     write_list = [(req.device_len if req.can_decode else -1) for req in batch.reqs]
-    write_host = torch.tensor(write_list, dtype=torch.int32, pin_memory=True)
+    write_host = torch.tensor(write_list, dtype=torch.int64, pin_memory=True)
     return mapping_host.to(device, non_blocking=True), write_host.to(device, non_blocking=True)

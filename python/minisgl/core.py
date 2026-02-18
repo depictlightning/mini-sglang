@@ -100,7 +100,9 @@ class Batch:
 @dataclass
 class Context:
     page_size: int
-    attn_backend: BaseAttnBackend
+    # NOTE: this table always treat page_size = 1
+    page_table: torch.Tensor = field(init=False)
+    attn_backend: BaseAttnBackend = field(init=False)
     moe_backend: BaseMoeBackend = field(init=False)
     _batch: Batch | None = field(default=None, init=False)
 
