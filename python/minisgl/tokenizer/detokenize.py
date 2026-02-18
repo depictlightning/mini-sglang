@@ -1,12 +1,8 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List
-
-if TYPE_CHECKING:
-    from transformers import LlamaTokenizer
+from typing import Dict, List
 
 from minisgl.message import DetokenizeMsg
+from transformers import PreTrainedTokenizerBase
 
 # Borrowed from sglang
 
@@ -65,7 +61,7 @@ class DecodeStatus:
 
 
 class DetokenizeManager:
-    def __init__(self, tokenizer: LlamaTokenizer) -> None:
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         # uid -> DecodeStatus
         self.decode_map: Dict[int, DecodeStatus] = {}
         self.tokenizer = tokenizer

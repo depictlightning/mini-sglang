@@ -1,5 +1,5 @@
 from .arch import is_arch_supported, is_sm90_supported, is_sm100_supported
-from .hf import cached_load_hf_config
+from .hf import cached_load_hf_config, download_hf_weight, load_tokenizer
 from .logger import init_logger
 from .misc import UNSET, Unset, call_if_main, div_ceil, div_even
 from .mp import (
@@ -10,13 +10,13 @@ from .mp import (
     ZmqPushQueue,
     ZmqSubQueue,
 )
-from .ms import cached_load_ms_config
 from .registry import Registry
 from .torch_utils import nvtx_annotate, torch_dtype
 
 __all__ = [
     "cached_load_hf_config",
-    "cached_load_ms_config",
+    "download_hf_weight",
+    "load_tokenizer",
     "init_logger",
     "is_arch_supported",
     "is_sm90_supported",

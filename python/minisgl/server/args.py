@@ -192,7 +192,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     parser.add_argument(
         "--model-source",
         type=str,
-        default=ServerArgs.model_source,
+        default="huggingface",
         choices=["huggingface", "modelscope"],
         help="The source to download model from. Either 'huggingface' or 'modelscope'.",
     )
@@ -231,27 +231,29 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
 
+    if kwargs["model_source"] == "modelscope":
+        model_path = kwargs["model_path"]
+        if not os.path.isdir(model_path):
+            from modelscope import snapshot_download
+
+            ignore_patterns = []
+            if kwargs["use_dummy_weight"]:
+                ignore_patterns = ["*.bin", "*.safetensors", "*.pt", "*.ckpt"]
+            model_path = snapshot_download(model_path, ignore_patterns=ignore_patterns)
+            kwargs["model_path"] = model_path
+    del kwargs["model_source"]
+
+    if (dtype_str := kwargs["dtype"]) == "auto":
+        from minisgl.utils import cached_load_hf_config
+
+        dtype_str = cached_load_hf_config(kwargs["model_path"]).dtype
+
     DTYPE_MAP = {
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
         "float32": torch.float32,
     }
-    if (dtype_str := kwargs["dtype"]) != "auto":
-        kwargs["dtype"] = DTYPE_MAP[dtype_str]
-    else:
-        if kwargs["model_source"] == "modelscope":
-            from minisgl.utils import cached_load_ms_config
-
-            dtype_or_str = cached_load_ms_config(kwargs["model_path"]).dtype
-        else:
-            from minisgl.utils import cached_load_hf_config
-
-            dtype_or_str = cached_load_hf_config(kwargs["model_path"]).dtype
-        if isinstance(dtype_or_str, str):
-            kwargs["dtype"] = DTYPE_MAP[dtype_or_str]
-        else:
-            kwargs["dtype"] = dtype_or_str
-
+    kwargs["dtype"] = DTYPE_MAP[dtype_str] if isinstance(dtype_str, str) else dtype_str
     kwargs["tp_info"] = DistributedInfo(0, kwargs["tensor_parallel_size"])
     del kwargs["tensor_parallel_size"]
 
