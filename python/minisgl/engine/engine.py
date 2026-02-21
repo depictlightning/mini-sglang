@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Dict, NamedTuple, Tuple
+from typing import Any, Dict, NamedTuple, Tuple
 
 import torch
 from minisgl.attention import create_attention_backend
@@ -11,7 +11,7 @@ from minisgl.kvcache import create_kvcache
 from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
-from minisgl.utils import div_even, init_logger, torch_dtype
+from minisgl.utils import div_even, init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory, mem_GB
@@ -26,14 +26,12 @@ class ForwardOutput(NamedTuple):
     copy_done_event: torch.cuda.Event
 
 
-def _align_up_32(num: int) -> int:
-    return (num + 31) // 32 * 32
-
-
 class Engine:
     def __init__(self, config: EngineConfig):
-        set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         assert not torch.cuda.is_initialized()
+        set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
+        _adjust_config(config)
+
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
         self.stream = torch.cuda.Stream()
@@ -214,3 +212,25 @@ class Engine:
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
+
+
+def _align_up_32(num: int) -> int:
+    return (num + 31) // 32 * 32
+
+
+def _adjust_config(config: EngineConfig):
+    def override(attr: str, value: Any):  # this is dangerous, use with caution
+        object.__setattr__(config, attr, value)
+
+    if config.attention_backend == "auto":
+        backend = "trtllm" if is_sm100_supported() else ("fa,fi" if is_sm90_supported() else "fi")
+        override("attention_backend", backend)
+        logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")
+
+    if config.attention_backend == "trtllm" and config.page_size not in [16, 32, 64]:
+        override("page_size", 64)
+        logger.warning_rank0("Page size is overridden to 64 for TRTLLM backend")
+
+    if config.model_config.is_moe and config.moe_backend == "auto":
+        override("moe_backend", "fused")
+        logger.info_rank0(f"Auto-selected MoE backend: {config.moe_backend}")

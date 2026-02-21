@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from minisgl.utils import Registry, init_logger, is_sm90_supported, is_sm100_supported
+from minisgl.utils import Registry, init_logger
 
 from .base import BaseAttnBackend, BaseAttnMetadata, HybridBackend
 
@@ -20,14 +20,11 @@ class BackendCreator(Protocol):
 SUPPORTED_ATTENTION_BACKENDS = Registry[BackendCreator]("Attention Backend")
 
 
-def resolve_auto_backend() -> str:
-    """Determine the best attention backend based on the GPU architecture and model."""
-    if is_sm100_supported():  # blackwell
-        return "fi"
-    elif is_sm90_supported():  # hopper
-        return "fa,fi"
-    else:  # pre-hopper
-        return "fi"
+@SUPPORTED_ATTENTION_BACKENDS.register("trtllm")
+def create_trtllm_backend(config: ModelConfig, kvcache: BaseKVCache):
+    from .trtllm import TensorRTLLMBackend
+
+    return TensorRTLLMBackend(config, kvcache)
 
 
 @SUPPORTED_ATTENTION_BACKENDS.register("fi")
@@ -44,10 +41,12 @@ def create_fa_backend(config: ModelConfig, kvcache: BaseKVCache):
     return FlashAttentionBackend(config, kvcache)
 
 
-def validate_attn_backend(backend: str):
+def validate_attn_backend(backend: str, allow_auto: bool = True):
     if backend != "auto":
         required_backends = backend.split(",") if "," in backend else [backend]
         SUPPORTED_ATTENTION_BACKENDS.assert_supported(required_backends)
+    else:
+        assert allow_auto, "auto is not allowed here"
     return backend
 
 
@@ -56,11 +55,7 @@ def create_attention_backend(
     config: ModelConfig,
     kvcache: BaseKVCache,
 ) -> BaseAttnBackend:
-    if backend == "auto":
-        backend = resolve_auto_backend()
-        logger.info(f"Auto-selected attention backend: {backend}")
-
-    validate_attn_backend(backend)
+    validate_attn_backend(backend, allow_auto=False)
     if "," in backend:
         assert backend.count(",") == 1, "Only one comma is allowed in hybrid backend"
         p_backend, d_backend = backend.split(",", 1)

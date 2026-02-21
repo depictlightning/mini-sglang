@@ -25,7 +25,6 @@ dependencies = [
     "accelerate",
     "msgpack",
     "modelscope",
-    "sgl_kernel>=0.3.17.post1",
     "torch<2.10.0",
     "transformers>=4.56.0,<=4.57.3",
     "flashinfer-python>=0.5.3",
@@ -35,6 +34,8 @@ dependencies = [
     "prompt_toolkit",
     "openai",
     "apache-tvm-ffi>=0.1.4",
+    "sgl_kernel>=0.3.17.post1",
+    "quack-kernels",
 ]
 
 [project.optional-dependencies]
