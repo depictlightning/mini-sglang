@@ -21,8 +21,11 @@ _MERGE_GROUPS = {
     ".up_proj": (".gate_up_proj", ("gate", "up")),
 }
 _SLOT_NAMES = {
-    ".q_proj": "q", ".k_proj": "k", ".v_proj": "v",
-    ".gate_proj": "gate", ".up_proj": "up",
+    ".q_proj": "q",
+    ".k_proj": "k",
+    ".v_proj": "v",
+    ".gate_proj": "gate",
+    ".up_proj": "up",
 }
 
 
