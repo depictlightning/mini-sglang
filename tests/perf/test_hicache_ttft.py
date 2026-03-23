@@ -15,6 +15,11 @@ import torch
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_DIR = REPO_ROOT / "python"
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
+
 from minisgl.benchmark.client import generate_prompt
 
 
@@ -102,7 +107,7 @@ async def _run_case(
 
     proc = subprocess.Popen(
         cmd,
-        cwd=str(Path(__file__).resolve().parents[2]),
+        cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
