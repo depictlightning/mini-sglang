@@ -129,7 +129,20 @@ class HiCacheTransferMixin:
     def load_page(self, host_indices: torch.Tensor, cuda_indices: torch.Tensor) -> None:
         from minisgl.kernel import transfer_hicache_one_page
 
-        # TODO: achieve transfer_hicache_one_page and invoke
+        assert len(host_indices) == len(cuda_indices)
+        assert len(host_indices) % self.page_size == 0, "page-wise load requires page-aligned length"
+        if len(host_indices) == 0:
+            return
+        assert torch.all(host_indices % self.page_size == 0)
+        assert torch.all(cuda_indices % self.page_size == 0)
+        transfer_hicache_one_page(
+            k_cache_dst=self._cuda_page[0],
+            v_cache_dst=self._cuda_page[1],
+            indices_dst=cuda_indices[:: self.page_size].div(self.page_size, rounding_mode="floor"),
+            k_cache_src=self._host_page[0],
+            v_cache_src=self._host_page[1],
+            indices_src=host_indices[:: self.page_size].div(self.page_size, rounding_mode="floor"),
+        )
 
 
 class HiCacheController(HiCacheTransferMixin):

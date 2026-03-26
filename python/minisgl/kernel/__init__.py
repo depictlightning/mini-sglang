@@ -1,6 +1,7 @@
 from .hicache import (
     allocate_host,
     transfer_hicache_all_layer,
+    transfer_hicache_one_page,
     transfer_hicache_one_layer,
     transfer_hicache_all_page,
 )
@@ -23,5 +24,6 @@ __all__ = [
     "moe_sum_reduce_triton",
     "transfer_hicache_one_layer",
     "transfer_hicache_all_layer",
+    "transfer_hicache_one_page",
     "transfer_hicache_all_page",
 ]
