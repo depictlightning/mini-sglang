@@ -65,6 +65,7 @@ class HiCacheTransferMixin:
         self.write_stream_ctx = torch.cuda.stream(self.write_stream)
         self.num_layers, _, _, num_kv_heads, head_dim = cuda_kv[0].shape
         self.device = cuda_kv[0].device
+        self.page_size = config.page_size
         item_bytes = cuda_kv[0].element_size()
         storage_shape = (-1, num_kv_heads * head_dim)
         # page-major views: [num_pages, page_size, num_layers, num_kv_heads, head_dim]
@@ -125,18 +126,10 @@ class HiCacheTransferMixin:
             element_size=self._element_bytes,
         )
 
-    def load_all_page(self, host_indices: torch.Tensor, cuda_indices: torch.Tensor) -> None:
-        from minisgl.kernel import transfer_hicache_all_page
+    def load_page(self, host_indices: torch.Tensor, cuda_indices: torch.Tensor) -> None:
+        from minisgl.kernel import transfer_hicache_one_page
 
-        transfer_hicache_all_page(
-            k_cache_dst=self._cuda_page[0],
-            v_cache_dst=self._cuda_page[1],
-            indices_dst=cuda_indices,
-            k_cache_src=self._host_page[0],
-            v_cache_src=self._host_page[1],
-            indices_src=host_indices,
-            page_size=self.page_size,
-        )
+        # TODO: achieve transfer_hicache_one_page and invoke
 
 
 class HiCacheController(HiCacheTransferMixin):
@@ -155,7 +148,6 @@ class HiCacheController(HiCacheTransferMixin):
             and config.host_mem_layout == "page_first"
             and not self.use_layerwise
         )
-        self.page_size = config.page_size
         self.ring_index = 0
         self.counter_ring_buffer = [HiCacheCounter(self.num_layers) for _ in range(RING_SIZE)]
         self.token_bytes = self.cuda_pool.get_per_token_bytes()
@@ -212,14 +204,23 @@ class HiCacheController(HiCacheTransferMixin):
         self.ring_index = (self.ring_index + 1) % RING_SIZE
         counter = self.counter_ring_buffer[self.ring_index]
         self.cuda_pool.set_hicache_counter(counter if self.use_layerwise else None)
-        host_indices, cuda_indices = self._merge_transactions(self.load_queue)
-        num_tokens = len(host_indices)
+        host_indices: torch.Tensor | None = None
+        cuda_indices: torch.Tensor | None = None
+        if not self.pagewise_load:
+            host_indices, cuda_indices = self._merge_transactions(self.load_queue)
+            num_tokens = len(host_indices)
+        else:
+            num_tokens = sum(len(tx.host_list[i]) for tx in self.load_queue for i in range(len(tx.host_list)))
         current_stream = torch.cuda.current_stream()
         counter.start_event.record(self.load_stream)
         with self.load_stream_ctx:
             self.load_stream.wait_stream(current_stream)
             if self.pagewise_load:
-                self.load_all_page(host_indices=host_indices, cuda_indices=cuda_indices)
+                for _, host_values, cuda_values in self.load_queue:
+                    for host_value, cuda_value in zip(host_values, cuda_values):
+                        host_indices = host_value.to(self.device, non_blocking=True)
+                        cuda_indices = cuda_value
+                        self.load_page(host_indices, cuda_indices)
             elif not self.use_layerwise:
                 self.load_all(host_indices=host_indices, cuda_indices=cuda_indices)
             else:
@@ -331,6 +332,7 @@ class HiCacheController(HiCacheTransferMixin):
 # NOTE: skip the annoying type checking here...
 def _create_event(enable_timing: bool = False) -> torch.Event:
     return torch.cuda.Event(enable_timing=enable_timing)  # type: ignore
+
 
 def _make_ptrs(ts: List[torch.Tensor], device: torch.device):
     return torch.tensor([t.data_ptr() for t in ts], device=device, dtype=torch.uint64)
