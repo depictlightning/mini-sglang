@@ -125,18 +125,10 @@ class HiCacheTransferMixin:
             element_size=self._element_bytes,
         )
 
-    def load_page(self, host_indices: torch.Tensor, cuda_indices: torch.Tensor) -> None:
-        from minisgl.kernel import transfer_hicache_page
+    def load_all_page(self, host_indices: torch.Tensor, cuda_indices: torch.Tensor) -> None:
+        from minisgl.kernel import transfer_hicache_all_page
 
-        transfer_hicache_page(
-            k_cache_dst=self._cuda_page[0],
-            v_cache_dst=self._cuda_page[1],
-            indices_dst=cuda_indices,
-            k_cache_src=self._host_page[0],
-            v_cache_src=self._host_page[1],
-            indices_src=host_indices,
-            page_size=self.page_size,
-        )
+        # TODO: achieve transfer_hicache_all_page and invoke
 
 
 class HiCacheController(HiCacheTransferMixin):
@@ -212,8 +204,6 @@ class HiCacheController(HiCacheTransferMixin):
         self.ring_index = (self.ring_index + 1) % RING_SIZE
         counter = self.counter_ring_buffer[self.ring_index]
         self.cuda_pool.set_hicache_counter(counter if self.use_layerwise else None)
-        host_indices: torch.Tensor | None = None
-        cuda_indices: torch.Tensor | None = None
         host_indices, cuda_indices = self._merge_transactions(self.load_queue)
         num_tokens = len(host_indices)
         current_stream = torch.cuda.current_stream()
@@ -221,7 +211,7 @@ class HiCacheController(HiCacheTransferMixin):
         with self.load_stream_ctx:
             self.load_stream.wait_stream(current_stream)
             if self.pagewise_load:
-                self.load_page(host_indices=host_indices, cuda_indices=cuda_indices)
+                self.load_all_page(host_indices=host_indices, cuda_indices=cuda_indices)
             elif not self.use_layerwise:
                 self.load_all(host_indices=host_indices, cuda_indices=cuda_indices)
             else:
