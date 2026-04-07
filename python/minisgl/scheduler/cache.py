@@ -90,7 +90,9 @@ class CacheManager:
         old_handle = req.cache_handle
         cached_len, new_handle = self._prefix_cache.insert_prefix(insert_ids, page_indices)
         if self.enable_hicache:
-            self._hicache_controller.prepare_write(new_handle)
+            # NOTE: quick demotion can safely run only after request completion.
+            # For unfinished requests, the handle will continue to serve decode.
+            self._hicache_controller.prepare_write(new_handle, allow_demotion=finished)
         # unlock until all operations on handle is done
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it
