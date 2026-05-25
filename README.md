@@ -2,185 +2,218 @@
 <img width="400" src="/assets/logo.png">
 </p>
 
-# Mini-SGLang
+<h1 align="center">Mini-SGLang + <b>HiCache</b></h1>
 
-A **lightweight yet high-performance** inference framework for Large Language Models.
+<p align="center">
+A <b>lightweight yet high-performance</b> LLM inference framework,<br/>
+extended with <b>HiCache</b> — a CPU/GPU hierarchical KV cache that uses DRAM as L2 for HBM.
+</p>
+
+<p align="center">
+  <a href="#-hicache"><b>⭐ HiCache</b></a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-benchmark">Benchmark</a> ·
+  <a href="#-architecture">Architecture</a> ·
+  <a href="#-documentation">Docs</a>
+</p>
 
 ---
 
-Mini-SGLang is a compact implementation of [SGLang](https://github.com/sgl-project/sglang), designed to demystify the complexities of modern LLM serving systems. With a compact codebase of **~5,000 lines of Python**, it serves as both a capable inference engine and a transparent reference for researchers and developers.
+This is a fork of [Mini-SGLang](https://github.com/sgl-project/mini-sglang) (from the SGLang team at LMSYS). The original framework provides a clean, ~5k-line reference implementation of modern LLM serving techniques — Radix Cache, Chunked Prefill, Overlap Scheduling, Tensor Parallelism, CUDA Graph, and FlashAttention/FlashInfer integration.
 
-## ✨ Key Features
+**This fork adds HiCache**, a full HBM↔DRAM KV cache offloading system (22 PRs, 41 commits), enabling much larger KV cache pools without additional GPU memory.
 
-- **High Performance**: Achieves state-of-the-art throughput and latency with advanced optimizations.
-- **Lightweight & Readable**: A clean, modular, and fully type-annotated codebase that is easy to understand and modify.
-- **Advanced Optimizations**:
-  - **Radix Cache**: Reuses KV cache for shared prefixes across requests.
-  - **Chunked Prefill**: Reduces peak memory usage for long-context serving.
-  - **Overlap Scheduling**: Hides CPU scheduling overhead with GPU computation.
-  - **Tensor Parallelism**: Scales inference across multiple GPUs.
-  - **Optimized Kernels**: Integrates **FlashAttention** and **FlashInfer** for maximum efficiency.
-  - ...
+---
+
+## ⭐ HiCache
+
+**HiCache turns CPU DRAM into a second-level cache for GPU HBM.** KV cache blocks are asynchronously transferred between GPU and CPU, dramatically expanding the effective KV cache capacity while keeping hot data on GPU for fast access.
+
+### The Problem
+
+LLM inference stores per-token Key and Value tensors (the "KV cache") in GPU HBM. As context length and concurrency grow, this cache can consume tens to hundreds of GB. HBM is expensive and limited — but CPU DRAM is abundant and cheap.
+
+### The Solution
+
+```
+┌────────────────────────────────────────────────┐
+│                   GPU (HBM)                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │  Page 0  │  │  Page 1  │  │  Page 2  │ ... │  ← Hot KV cache
+│  └──────────┘  └──────────┘  └──────────┘     │
+│       ↑↓ DMA       ↑↓ DMA       ↑↓ DMA         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │  Page 0  │  │  Page 1  │  │  Page 2  │ ... │  ← Cold backup
+│  └──────────┘  └──────────┘  └──────────┘     │
+│              CPU DRAM (up to 2× HBM)           │
+└────────────────────────────────────────────────┘
+```
+
+### Key Mechanisms
+
+| Mechanism | Description |
+|-----------|-------------|
+| **Three Transport Strategies** | `layerwise` (stream per layer, overlaps compute), `non-layerwise` (bulk DMA for all layers), `pagewise` (page-level copy when layouts match) |
+| **Quick Demotion** | After a request finishes, KV cache is asynchronously written to DRAM, then immediately evicted from HBM — freeing GPU memory without blocking compute |
+| **Deferred Retry** | If a node is still locked (in use by another request), demotion is deferred and retried at the next write-ack cycle |
+| **Race-Free Design** | Demotion gates on `allow_demotion=finished` — never evicts HBM pages still referenced by active decode requests |
+| **DMA-Based Transfer** | Uses `Tensor.copy_(non_blocking=True)` on dedicated CUDA streams — no custom kernels, fully asynchronous, zero compute interference |
+
+### How to Enable
+
+```bash
+# Basic HiCache: host memory = 2× HBM (default)
+python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix
+
+# With Quick Demotion (evict from HBM immediately after DRAM write)
+python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --hicache-quick-demotion
+
+# Tune host memory ratio
+python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --hicache-ratio 2.0
+
+# Disable layerwise (use bulk non-layerwise transfer)
+python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --disable-layerwise
+```
+
+---
+
+## ✨ Features
+
+### HiCache (This Fork)
+- **HBM↔DRAM KV Cache Offloading** — Use CPU memory as L2 cache for GPU
+- **Quick Demotion** — Instant HBM reclamation after async DRAM write
+- **Three Transport Modes** — layerwise · non-layerwise · pagewise
+- **Deferred Retry** — Graceful handling of locked nodes during demotion
+- **Race-Free** — Demotion gated on request completion, never corrupts active handles
+
+### From Upstream (Mini-SGLang)
+- **Radix Cache** — Prefix-tree KV reuse across requests
+- **Chunked Prefill** — Reduces peak memory for long-context serving
+- **Overlap Scheduling** — Hides CPU overhead with GPU computation
+- **Tensor Parallelism** — Multi-GPU scaling via NCCL
+- **CUDA Graph** — Eliminates CPU launch overhead in decode
+- **FlashAttention / FlashInfer** — State-of-the-art attention kernels
+
+---
 
 ## 🚀 Quick Start
 
-> **⚠️ Platform Support**: Mini-SGLang currently supports **Linux only** (x86_64 and aarch64). Windows and macOS are not supported due to dependencies on Linux-specific CUDA kernels (`sgl-kernel`, `flashinfer`). We recommend using [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows or Docker for cross-platform compatibility.
+> ⚠️ **Platform**: Linux only (x86_64 / aarch64). Windows users: use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-### 1. Environment Setup
+### 1. Prerequisites
 
-We recommend using `uv` for a fast and reliable installation (note that `uv` does not conflict with `conda`).
-
-```bash
-# Create a virtual environment (Python 3.10+ recommended)
-uv venv --python=3.12
-source .venv/bin/activate
-```
-
-**Prerequisites**: Mini-SGLang relies on CUDA kernels that are JIT-compiled. Ensure you have the **NVIDIA CUDA Toolkit** installed and that its version matches your driver's version. You can check your driver's CUDA capability with `nvidia-smi`.
+- **Python 3.10+**, **NVIDIA CUDA Toolkit** (match your driver version)
+- `uv` (recommended) or `pip`
 
 ### 2. Installation
 
-Install Mini-SGLang directly from the source:
-
 ```bash
-git clone https://github.com/sgl-project/mini-sglang.git
-cd mini-sglang && uv venv --python=3.12 && source .venv/bin/activate
+git clone https://github.com/depictlightning/mini-sglang.git
+cd mini-sglang
+uv venv --python=3.12 && source .venv/bin/activate
 uv pip install -e .
 ```
 
-<details>
-<summary><b>💡 Installing on Windows (WSL2)</b></summary>
-
-Since Mini-SGLang requires Linux-specific dependencies, Windows users should use WSL2:
-
-1. **Install WSL2** (if not already installed):
-   ```powershell
-   # In PowerShell (as Administrator)
-   wsl --install
-   ```
-
-2. **Install CUDA on WSL2**:
-   - Follow [NVIDIA's WSL2 CUDA guide](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
-   - Ensure your Windows GPU drivers support WSL2
-
-3. **Install Mini-SGLang in WSL2**:
-   ```bash
-   # Inside WSL2 terminal
-   git clone https://github.com/sgl-project/mini-sglang.git
-   cd mini-sglang && uv venv --python=3.12 && source .venv/bin/activate
-   uv pip install -e .
-   ```
-
-4. **Access from Windows**: The server will be accessible at `http://localhost:8000` from Windows browsers and applications.
-
-</details>
-
-<details>
-<summary><b>🐳 Running with Docker</b></summary>
-
-**Prerequisites**:
-- [Docker](https://docs.docker.com/get-docker/)
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-
-1. **Build the Docker image**:
-   ```bash
-   docker build -t minisgl .
-   ```
-
-2. **Run the server**:
-   ```bash
-   docker run --gpus all -p 1919:1919 \
-       minisgl --model Qwen/Qwen3-0.6B --host 0.0.0.0
-   ```
-
-3. **Run in interactive shell mode**:
-   ```bash
-   docker run -it --gpus all \
-       minisgl --model Qwen/Qwen3-0.6B --shell
-   ```
-
-4. **Using Docker Volumes for persistent caches** (recommended for faster subsequent startups):
-   ```bash
-   docker run --gpus all -p 1919:1919 \
-       -v huggingface_cache:/app/.cache/huggingface \
-       -v tvm_cache:/app/.cache/tvm-ffi \
-       -v flashinfer_cache:/app/.cache/flashinfer \
-       minisgl --model Qwen/Qwen3-0.6B --host 0.0.0.0
-   ```
-
-</details>
-
-### 3. Online Serving
-
-Launch an OpenAI-compatible API server with a single command.
+### 3. Launch with HiCache
 
 ```bash
-# Deploy Qwen/Qwen3-0.6B on a single GPU
-python -m minisgl --model "Qwen/Qwen3-0.6B"
+# Basic server with HiCache
+python -m minisgl --model "Qwen/Qwen3-0.6B" --cache hiradix
 
-# Deploy meta-llama/Llama-3.1-70B-Instruct on 4 GPUs with Tensor Parallelism, on port 30000
-python -m minisgl --model "meta-llama/Llama-3.1-70B-Instruct" --tp 4 --port 30000
+# With Quick Demotion + tuned ratio
+python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix \
+    --hicache-ratio 2.0 --hicache-quick-demotion
 ```
-
-Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
 
 ### 4. Interactive Shell
 
-Chat with your model directly in the terminal by adding the `--shell` flag.
-
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -m minisgl --model "Qwen/Qwen3-0.6B" --cache hiradix --shell
 ```
 
-![shell-example](https://lmsys.org/images/blog/minisgl/shell.png)
-
-You can also use `/reset` to clear the chat history.
-
-## Benchmark
-
-### Offline inference
-
-See [bench.py](./benchmark/offline/bench.py) for more details. Set `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` for ablation study on overlap scheduling.
-
-Test Configuration:
-
-- Hardware: 1xH200 GPU.
-- Model: Qwen3-0.6B, Qwen3-14B
-- Total Requests: 256 sequences
-- Input Length: Randomly sampled between 100-1024 tokens
-- Output Length: Randomly sampled between 100-1024 tokens
-
-![offline](https://lmsys.org/images/blog/minisgl/offline.png)
-
-### Online inference
-
-See [benchmark_qwen.py](./benchmark/online/bench_qwen.py) for more details.
-
-Test Configuration:
-
-- Hardware: 4xH200 GPU, connected by NVLink.
-- Model: Qwen3-32B
-- Dataset: [Qwen trace](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon/blob/main/qwen_traceA_blksz_16.jsonl), replaying first 1000 requests.
-
-Launch command:
+<details>
+<summary><b>🐳 Docker</b></summary>
 
 ```bash
-# Mini-SGLang
-python -m minisgl --model "Qwen/Qwen3-32B" --tp 4 --cache naive
+docker build -t minisgl .
+docker run --gpus all -p 1919:1919 \
+    minisgl --model Qwen/Qwen3-0.6B --cache hiradix --host 0.0.0.0
+```
+</details>
 
-# SGLang
-python3 -m sglang.launch_server --model "Qwen/Qwen3-32B" --tp 4 \
-    --disable-radix --port 1919 --decode-attention flashinfer
+---
+
+## 📊 Benchmark
+
+### HiCache Throughput
+
+Tested on **1× H800 GPU** with **Qwen3-14B**:
+
+| Configuration | Throughput | vs Baseline |
+|---------------|-----------|-------------|
+| Radix (HBM only) | baseline | 1.0× |
+| **HiRadix (HiCache)** | **1.2×** | **+20%** |
+
+> HiCache achieves 1.2× throughput by offloading cold KV pages to DRAM, freeing HBM for more concurrent requests.
+
+### Upstream Benchmarks
+
+See upstream [bench.py](./benchmark/offline/bench.py) for offline throughput, and [bench_qwen.py](./benchmark/online/bench_qwen.py) for online serving with Qwen3-32B on 4×H200.
+
+---
+
+## 🏗 Architecture
+
+```
+User Request
+    │
+    ▼
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐
+│  API Server  │────▶│  Tokenizer   │────▶│  Scheduler   │
+│  (FastAPI)   │◀────│  /Detokenizer│◀────│  (Rank 0)    │
+└─────────────┘     └──────────────┘     └──────┬───────┘
+                                                │ NCCL broadcast
+                                     ┌──────────┼──────────┐
+                                     ▼          ▼          ▼
+                              ┌──────────┐ ┌──────────┐ ┌──────────┐
+                              │ Engine 0 │ │ Engine 1 │ │ Engine N │
+                              │  (GPU 0) │ │  (GPU 1) │ │  (GPU N) │
+                              └────┬─────┘ └──────────┘ └──────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+              ┌──────────┐  ┌──────────┐  ┌──────────┐
+              │ KV Cache │  │  HiCache │  │ Attention│
+              │  (Radix)  │◀─│Controller│─▶│ Backend  │
+              └──────────┘  └────┬─────┘  └──────────┘
+                                 │ DMA
+                                 ▼
+                          ┌────────────┐
+                          │ CPU DRAM   │
+                          │ (Host Pool)│
+                          └────────────┘
 ```
 
-> **Note**: If you encounter network issues when downloading models from HuggingFace, try using `--model-source modelscope` to download from ModelScope instead:
-> ```bash
-> python -m minisgl --model "Qwen/Qwen3-32B" --tp 4 --model-source modelscope
-> ```
+Key modules for HiCache:
+- [`python/minisgl/hicache/controller.py`](./python/minisgl/hicache/controller.py) — Transfer orchestration (load/write queues, DMA, Quick Demotion)
+- [`python/minisgl/kvcache/hiradix_cache.py`](./python/minisgl/kvcache/hiradix_cache.py) — Dual-tier prefix tree (HBM + DRAM node values)
+- [`python/minisgl/scheduler/cache.py`](./python/minisgl/scheduler/cache.py) — CacheManager integration, lazy-free, slot recycling
+- [`python/minisgl/kernel/csrc/jit/hicache.cu`](./python/minisgl/kernel/csrc/jit/hicache.cu) — Custom CUDA transfer kernels (legacy; being replaced by DMA)
 
-![online](https://lmsys.org/images/blog/minisgl/online.png)
+---
 
-## 📚 Learn More
+## 📚 Documentation
 
-- **[Detailed Features](./docs/features.md)**: Explore all available features and command-line arguments.
-- **[System Architecture](./docs/structures.md)**: Dive deep into the design and data flow of Mini-SGLang.
+| Document | Description |
+|----------|-------------|
+| [`docs/features.md`](./docs/features.md) | Full feature list & CLI arguments |
+| [`docs/structures.md`](./docs/structures.md) | System architecture & process-level data flow |
+| [`docs/kv_cache_flow.md`](./docs/kv_cache_flow.md) | 🔍 KV cache full lifecycle: match → allocate → insert → write-back → load → evict |
+| [`docs/write_back_chain.md`](./docs/write_back_chain.md) | 🔍 HiCache write-back call chain: from `cache_req` to async DMA ack |
+
+---
+
+## 📄 License
+
+This project inherits the [Apache 2.0 License](./LICENSE) from [Mini-SGLang](https://github.com/sgl-project/mini-sglang).

@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="980" viewBox="0 0 1320 980">
+  <defs>
+    <style>
+      .bg { fill: #fbf8f3; }
+      .box { fill: #ffffff; stroke: #263238; stroke-width: 2; rx: 14; ry: 14; }
+      .title { font: 700 26px Arial, sans-serif; fill: #1b1f23; }
+      .text { font: 16px Arial, sans-serif; fill: #1b1f23; }
+      .small { font: 14px Arial, sans-serif; fill: #455a64; }
+      .arrow { stroke: #37474f; stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+      .dash { stroke: #6d4c41; stroke-width: 2.5; fill: none; stroke-dasharray: 8 6; marker-end: url(#arrowheadBrown); }
+      .lane { fill: #f1ece3; stroke: #d8cfc3; stroke-width: 1.5; rx: 18; ry: 18; }
+      .tag { fill: #efe6d6; stroke: #c9b89b; stroke-width: 1.5; rx: 10; ry: 10; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+      <polygon points="0,0 10,4 0,8" fill="#37474f" />
+    </marker>
+    <marker id="arrowheadBrown" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+      <polygon points="0,0 10,4 0,8" fill="#6d4c41" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1320" height="980" />
+  <text class="title" x="50" y="52">Mini-SGLang HiCache write_back 调用链</text>
+  <text class="small" x="50" y="82">从缓存插入、选择性写回、异步写流，到完成确认与句柄解锁</text>
+
+  <rect class="lane" x="40" y="120" width="1240" height="780" />
+
+  <rect class="box" x="70" y="165" width="270" height="82" />
+  <text class="text" x="205" y="198" text-anchor="middle">CacheManager.cache_req</text>
+  <text class="small" x="205" y="222" text-anchor="middle">插入 prefix 后触发 prepare_write</text>
+
+  <rect class="box" x="390" y="165" width="270" height="82" />
+  <text class="text" x="525" y="198" text-anchor="middle">HiCacheController.prepare_write</text>
+  <text class="small" x="525" y="222" text-anchor="middle">判断可写长度并分配 host 空间</text>
+
+  <rect class="tag" x="705" y="163" width="220" height="36" />
+  <text class="small" x="815" y="187" text-anchor="middle">needed_len &gt;= WRITE_LENGTH_THRESHOLD ?</text>
+
+  <rect class="box" x="705" y="215" width="220" height="82" />
+  <text class="text" x="815" y="248" text-anchor="middle">_try_allocate_host</text>
+  <text class="small" x="815" y="272" text-anchor="middle">从 free_slots / evict 申请 host 页</text>
+
+  <rect class="box" x="960" y="215" width="260" height="82" />
+  <text class="text" x="1090" y="248" text-anchor="middle">HiRadixPrefixCache.set_host</text>
+  <text class="small" x="1090" y="272" text-anchor="middle">把 host 索引登记到节点，收集 cuda_list</text>
+
+  <rect class="box" x="390" y="335" width="270" height="82" />
+  <text class="text" x="525" y="368" text-anchor="middle">write_queue.append(Transaction)</text>
+  <text class="small" x="525" y="392" text-anchor="middle">把写事务加入队列</text>
+
+  <rect class="box" x="390" y="460" width="270" height="82" />
+  <text class="text" x="525" y="493" text-anchor="middle">HiCacheController.start_write</text>
+  <text class="small" x="525" y="517" text-anchor="middle">合并事务并切到写流</text>
+
+  <rect class="box" x="705" y="460" width="220" height="82" />
+  <text class="text" x="815" y="493" text-anchor="middle">_merge_transactions</text>
+  <text class="small" x="815" y="517" text-anchor="middle">拼接 host_indices / cuda_indices</text>
+
+  <rect class="box" x="960" y="460" width="260" height="82" />
+  <text class="text" x="1090" y="493" text-anchor="middle">store_all</text>
+  <text class="small" x="1090" y="517" text-anchor="middle">调用 transfer_hicache_all_layer</text>
+
+  <rect class="box" x="390" y="620" width="270" height="82" />
+  <text class="text" x="525" y="653" text-anchor="middle">transfer_hicache_all_layer</text>
+  <text class="small" x="525" y="677" text-anchor="middle">device → host KV 拷贝</text>
+
+  <rect class="box" x="705" y="620" width="220" height="82" />
+  <text class="text" x="815" y="653" text-anchor="middle">ack_write_queue</text>
+  <text class="small" x="815" y="677" text-anchor="middle">记录 start / finish event</text>
+
+  <rect class="box" x="960" y="620" width="260" height="82" />
+  <text class="text" x="1090" y="653" text-anchor="middle">refresh(tp_cpu_group)</text>
+  <text class="small" x="1090" y="677" text-anchor="middle">all_reduce MIN 统一确认完成数</text>
+
+  <rect class="box" x="390" y="760" width="270" height="82" />
+  <text class="text" x="525" y="793" text-anchor="middle">unlock handles</text>
+  <text class="small" x="525" y="817" text-anchor="middle">写完成后解除锁</text>
+
+  <rect class="box" x="705" y="760" width="515" height="82" />
+  <text class="text" x="962" y="793" text-anchor="middle">write_back 完成</text>
+  <text class="small" x="962" y="817" text-anchor="middle">host 备份已可用于后续 evict / 跨实例共享</text>
+
+  <path class="arrow" d="M 340 206 L 390 206" />
+  <path class="arrow" d="M 660 206 L 705 206" />
+  <path class="arrow" d="M 925 233 L 960 251" />
+  <path class="arrow" d="M 815 297 L 815 335 L 525 335" />
+  <path class="arrow" d="M 525 417 L 525 460" />
+  <path class="arrow" d="M 660 501 L 705 501" />
+  <path class="arrow" d="M 925 501 L 960 501" />
+  <path class="arrow" d="M 1090 542 L 1090 620" />
+  <path class="arrow" d="M 705 661 L 660 661" />
+  <path class="arrow" d="M 815 702 L 815 760" />
+  <path class="arrow" d="M 960 702 L 960 760" />
+  <path class="dash" d="M 1090 702 C 1090 730, 900 730, 900 792 C 900 836, 705 836, 705 801" />
+
+  <rect class="tag" x="70" y="880" width="1180" height="48" />
+  <text class="small" x="660" y="910" text-anchor="middle">核心特征：当前实现是阈值触发的选择性 write_back，而不是每次访问都立即写回；写完成依赖 refresh 的跨 rank 一致确认。</text>
+</svg>
