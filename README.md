@@ -36,19 +36,57 @@ LLM inference stores per-token Key and Value tensors (the "KV cache") in GPU HBM
 
 ### The Solution
 
+HiCache stores KV cache in **two layout options** on CPU, each paired with a GPU-side strategy:
+
+#### Approach 1: CPU `page_first` + GPU `layer_first` (recommended)
+
+CPU pages are stored contiguously for fast write-back; GPU keeps the compute-friendly `layer_first` layout. **Index-based transfer via CUDA kernel** handles the layout mismatch transparently — each token is copied at its correct offset on both sides using independent stride values. No intermediate buffer needed.
+
 ```
-┌────────────────────────────────────────────────┐
-│                   GPU (HBM)                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
-│  │  Page 0  │  │  Page 1  │  │  Page 2  │ ... │  ← Hot KV cache
-│  └──────────┘  └──────────┘  └──────────┘     │
-│       ↑↓ DMA       ↑↓ DMA       ↑↓ DMA         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
-│  │  Page 0  │  │  Page 1  │  │  Page 2  │ ... │  ← Cold backup
-│  └──────────┘  └──────────┘  └──────────┘     │
-│              CPU DRAM (up to 2× HBM)           │
-└────────────────────────────────────────────────┘
+         CPU (page_first)                     GPU (layer_first)
+  ┌────────────────────────┐           ┌────────────────────────┐
+  │  Page 0  │ Page 1 │... │           │ L0: [t0][t1][t2]...   │
+  │  ┌──────────────┐      │  ──load──▶│ L1: [t0][t1][t2]...   │
+  │  │L0 L1 ... LN │      │  ◀─write──│ L2: [t0][t1][t2]...   │
+  │  │[tokens 0..S]│      │           │                        │
+  │  └──────────────┘      │           │  ← coalesced 访存，计算快  │
+  │  ← 整页连续，DMA 友好   │           └────────────────────────┘
+  └────────────────────────┘
+          ↑ index-based transfer (CUDA kernel, stride-aware)
 ```
+
+- ✅ GPU 计算不受影响，attention 保持合并访问
+- ✅ CPU 整页连续，写回效率高
+- ✅ 传输内核自动处理 stride 差异，无需中间媒介
+
+#### Approach 2: CPU `page_first` + GPU `page_first` (pagewise)
+
+Both ends use the same `page_first` layout. Transfer is done via **`torch.Tensor.copy_()` (DMA)**, copying entire pages at once. No CUDA kernel needed. However, attention kernel performance degrades because consecutive tokens span `L × H × D` apart in memory — coalesced access breaks down.
+
+```
+         CPU (page_first)                     GPU (page_first)
+  ┌────────────────────────┐           ┌────────────────────────┐
+  │  Page 0  │ Page 1 │... │  ──DMA──▶│  Page 0  │ Page 1 │... │
+  │  ┌──────────────┐      │  ◀──DMA──│  ┌──────────────┐      │
+  │  │L0 L1 ... LN │      │           │  │L0 L1 ... LN │      │
+  │  └──────────────┘      │           │  └──────────────┘      │
+  │  ← 布局一致，整页 copy   │           │  ← 计算访存非连续，慢    │
+  └────────────────────────┘           └────────────────────────┘
+```
+
+- ✅ 传输零 kernel launch，纯 DMA 拷贝
+- ✅ 当 indices 连续时仅需 2 次 `copy_()`（K+V）
+- ❌ GPU attention 合并访问失效，计算吞吐下降 20-40%
+
+| 对比维度 | Approach 1 (混合) | Approach 2 (pagewise) |
+|----------|:---:|:---:|
+| GPU 计算速度 | ⭐⭐⭐ 快 | ⭐ 慢 |
+| CPU 写回效率 | ⭐⭐⭐ 快 | ⭐⭐⭐ 快 |
+| 传输方式 | CUDA kernel（index + stride） | `copy_()`（DMA） |
+| 布局约束 | 各自独立 | 必须一致 |
+| **推荐** | ✅ 默认 | 仅极端场景 |
+
+> **核心设计原则**：GPU 计算效率优先于 DMA 带宽，因为计算是持续性的、传输是间歇性且可交叠的。
 
 ### Key Mechanisms
 
@@ -58,7 +96,8 @@ LLM inference stores per-token Key and Value tensors (the "KV cache") in GPU HBM
 | **Quick Demotion** | After a request finishes, KV cache is asynchronously written to DRAM, then immediately evicted from HBM — freeing GPU memory without blocking compute |
 | **Deferred Retry** | If a node is still locked (in use by another request), demotion is deferred and retried at the next write-ack cycle |
 | **Race-Free Design** | Demotion gates on `allow_demotion=finished` — never evicts HBM pages still referenced by active decode requests |
-| **DMA-Based Transfer** | Uses `Tensor.copy_(non_blocking=True)` on dedicated CUDA streams — no custom kernels, fully asynchronous, zero compute interference |
+| **Index-Based Transfer** | Approach 1 (recommended): CUDA kernel with per-token index + stride, handles `page_first`→`layer_first` layout mismatch without intermediate buffer |
+| **Pagewise DMA Transfer** | Approach 2: `torch.Tensor.copy_()` (DMA copy engine), zero kernel launch, only works when both ends share `page_first` layout |
 
 ### How to Enable
 
