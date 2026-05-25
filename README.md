@@ -22,7 +22,7 @@ extended with <b>HiCache</b> — a CPU/GPU hierarchical KV cache that uses DRAM 
 
 This is a fork of [Mini-SGLang](https://github.com/sgl-project/mini-sglang) (from the SGLang team at LMSYS). The original framework provides a clean, ~5k-line reference implementation of modern LLM serving techniques — Radix Cache, Chunked Prefill, Overlap Scheduling, Tensor Parallelism, CUDA Graph, and FlashAttention/FlashInfer integration.
 
-**This fork adds HiCache**, a full HBM↔DRAM KV cache offloading system (22 PRs, 41 commits), enabling much larger KV cache pools without additional GPU memory.
+**This fork adds HiCache**, a full HBM↔DRAM KV cache offloading system, enabling much larger KV cache pools without additional GPU memory.
 
 ---
 
@@ -64,16 +64,16 @@ LLM inference stores per-token Key and Value tensors (the "KV cache") in GPU HBM
 
 ```bash
 # Basic HiCache: host memory = 2× HBM (default)
-python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix
+python -m minisgl --model "Qwen/Qwen3-8B" --cache hiradix
 
 # With Quick Demotion (evict from HBM immediately after DRAM write)
-python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --hicache-quick-demotion
+python -m minisgl --model "Qwen/Qwen3-8B" --cache hiradix --hicache-quick-demotion
 
 # Tune host memory ratio
-python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --hicache-ratio 2.0
+python -m minisgl --model "Qwen/Qwen3-8B" --cache hiradix --hicache-ratio 2.0
 
 # Disable layerwise (use bulk non-layerwise transfer)
-python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix --disable-layerwise
+python -m minisgl --model "Qwen/Qwen3-8B" --cache hiradix --disable-layerwise
 ```
 
 ---
@@ -122,7 +122,7 @@ uv pip install -e .
 python -m minisgl --model "Qwen/Qwen3-0.6B" --cache hiradix
 
 # With Quick Demotion + tuned ratio
-python -m minisgl --model "Qwen/Qwen3-14B" --cache hiradix \
+python -m minisgl --model "Qwen/Qwen3-8B" --cache hiradix \
     --hicache-ratio 2.0 --hicache-quick-demotion
 ```
 
@@ -148,7 +148,7 @@ docker run --gpus all -p 1919:1919 \
 
 ### HiCache Throughput
 
-Tested on **1× H800 GPU** with **Qwen3-14B**:
+Tested on **1× H800 GPU** with **Qwen3-8B**:
 
 | Configuration | Throughput | vs Baseline |
 |---------------|-----------|-------------|
